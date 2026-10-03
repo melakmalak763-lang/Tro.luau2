@@ -1,0 +1,648 @@
+-- ============================================================
+-- SYS GUARD v7.0 - STABLE EDITION
+-- Working | Anti-Crash | Anti-Detect | Mobile Ready
+-- ~600 lines, no compression tricks
+-- ============================================================
+
+-- 1. البيئة
+local _ENV = (getgenv and getgenv()) or _G
+
+-- 2. تنظيف النسخة القديمة
+if _ENV._SYSGUARD then
+    pcall(function()
+        if _ENV._SYSGUARD.clean then _ENV._SYSGUARD.clean() end
+    end)
+    _ENV._SYSGUARD = nil
+end
+
+-- 3. الجدول الرئيسي
+local SG = {
+    alive = true,
+    banned = {},
+    protected = setmetatable({}, { __mode = "k" }),
+    hooks = {},
+    protectedFuncs = {}
+}
+_ENV._SYSGUARD = SG
+
+-- 4. خدمات
+local CG = game:GetService("CoreGui")
+local PLR = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+
+-- 5. parent آمن
+local parent
+pcall(function() parent = CG end)
+if not parent then
+    parent = PLR.LocalPlayer:WaitForChild("PlayerGui")
+end
+
+-- 6. دالة الحماية (تتحقق من وجود newcclosure)
+local function protectFunc(f)
+    if type(_ENV.newcclosure) == "function" then
+        local ok, result = pcall(_ENV.newcclosure, f)
+        if ok and result then return result end
+    end
+    return f
+end
+
+-- 7. حفظ الدوال الأصلية
+local ORI = {
+    getgc = _ENV.getgc,
+    getreg = _ENV.getreg,
+    getconnections = _ENV.getconnections,
+    getupvalue = _ENV.getupvalue,
+    getconstants = _ENV.getconstants,
+    loadstring = _ENV.loadstring,
+    request = _ENV.request or (syn and syn.request) or (http and http.request) or http_request,
+    hookfunction = _ENV.hookfunction,
+    getnamecallmethod = _ENV.getnamecallmethod,
+    setreadonly = _ENV.setreadonly,
+    getrawmetatable = _ENV.getrawmetatable
+}
+
+-- ============================================================
+-- 8. حماية getgc
+-- ============================================================
+if type(ORI.getgc) == "function" then
+    local wrapper = protectFunc(function(...)
+        local ok, list = pcall(ORI.getgc, ...)
+        if not ok or type(list) ~= "table" then return list end
+        local out = {}
+        for i = 1, #list do
+            if not SG.banned[list[i]] then
+                out[#out + 1] = list[i]
+            end
+        end
+        return out
+    end)
+    _ENV.getgc = wrapper
+    SG.hooks.getgc = wrapper
+end
+
+-- ============================================================
+-- 9. حماية getreg
+-- ============================================================
+if type(ORI.getreg) == "function" then
+    local wrapper = protectFunc(function()
+        local ok, reg = pcall(ORI.getreg)
+        if not ok or type(reg) ~= "table" then return reg end
+        local clean = {}
+        for k, v in pairs(reg) do
+            if v ~= SG and v ~= _ENV._SYSGUARD then
+                clean[k] = v
+            end
+        end
+        return clean
+    end)
+    _ENV.getreg = wrapper
+    SG.hooks.getreg = wrapper
+end
+
+-- ============================================================
+-- 10. حماية getconnections
+-- ============================================================
+if type(ORI.getconnections) == "function" then
+    local wrapper = protectFunc(function(obj)
+        if SG.protected[obj] then return {} end
+        local ok, result = pcall(ORI.getconnections, obj)
+        if ok then return result end
+        return {}
+    end)
+    _ENV.getconnections = wrapper
+    SG.hooks.getconnections = wrapper
+end
+
+-- ============================================================
+-- 11. حماية getupvalue / getconstants
+-- ============================================================
+local function protectDumpFunc(name)
+    local original = _ENV[name]
+    if type(original) ~= "function" then return end
+    local wrapper = protectFunc(function(f, ...)
+        if SG.protectedFuncs[f] then return nil end
+        return original(f, ...)
+    end)
+    _ENV[name] = wrapper
+    if _ENV.debug and _ENV.debug[name] then
+        _ENV.debug[name] = wrapper
+    end
+end
+
+protectDumpFunc("getupvalue")
+protectDumpFunc("getconstants")
+
+-- ============================================================
+-- 12. إنشاء المجلد الوهمي والواجهة
+-- ============================================================
+local container = Instance.new("Folder")
+container.Name = "Terrain"
+container.Parent = parent
+SG.banned[container] = true
+SG.protected[container] = true
+
+local function randomStr(n)
+    local s = ""
+    local chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+    for _ = 1, n do
+        local i = math.random(1, #chars)
+        s = s .. chars:sub(i, i)
+    end
+    return s
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "_c" .. randomStr(10)
+screenGui.ResetOnSpawn = false
+screenGui.DisplayOrder = 999999
+screenGui.IgnoreGuiInset = true
+screenGui.Enabled = false
+screenGui.Parent = container
+SG.banned[screenGui] = true
+SG.protected[screenGui] = true
+
+-- ============================================================
+-- 13. الحماية عبر metatable (طبقة واحدة موحّدة)
+-- ============================================================
+pcall(function()
+    if type(ORI.getrawmetatable) ~= "function" then return end
+    local mt = ORI.getrawmetatable(game)
+    if not mt then return end
+    
+    if type(ORI.setreadonly) == "function" then
+        pcall(ORI.setreadonly, mt, false)
+    end
+    
+    local origIndex = mt.__index
+    local origNamecall = mt.__namecall
+    
+    -- __index موحّد
+    mt.__index = protectFunc(function(self, key)
+        -- إخفاء اسم وكلاس الواجهة
+        if (self == screenGui or self == container) and key == "Name" then
+            return "ConfigService"
+        end
+        if (self == screenGui or self == container) and key == "ClassName" then
+            return "Folder"
+        end
+        -- إخفاء متغيراتنا عن _G
+        if type(key) == "string" and key:sub(1, 4) == "_SYS" then
+            return nil
+        end
+        return origIndex(self, key)
+    end)
+    
+    -- __namecall موحّد
+    mt.__namecall = protectFunc(function(self, ...)
+        local method = "unknown"
+        if type(ORI.getnamecallmethod) == "function" then
+            local ok, m = pcall(ORI.getnamecallmethod)
+            if ok then method = m end
+        end
+        
+        -- منع Destroy
+        if method == "Destroy" and (self == screenGui or self == container) then
+            return nil
+        end
+        
+        -- منع FindFirstChild / WaitForChild
+        if method == "FindFirstChild" or method == "WaitForChild" or method == "FindFirstChildOfClass" then
+            local args = {...}
+            local name = args[1]
+            if type(name) == "string" then
+                local lower = string.lower(name)
+                if lower:find("sniffer", 1, true) or lower:find("spy", 1, true)
+                    or lower:find("intercept", 1, true) or lower:find("phantom", 1, true)
+                    or lower:find("_c", 1, true) or lower:find("_lg", 1, true) then
+                    if method == "WaitForChild" then
+                        return Instance.new("Folder")
+                    end
+                    return nil
+                end
+            end
+        end
+        
+        -- إخفاء المجلد عن GetChildren
+        if method == "GetChildren" or method == "GetDescendants" then
+            if self == parent then
+                local kids = origNamecall(self, ...)
+                local filtered = {}
+                for _, k in ipairs(kids) do
+                    if k ~= container then
+                        filtered[#filtered + 1] = k
+                    end
+                end
+                return filtered
+            end
+            if self == container then
+                return {}
+            end
+        end
+        
+        return origNamecall(self, ...)
+    end)
+    
+    if type(ORI.setreadonly) == "function" then
+        pcall(ORI.setreadonly, mt, true)
+    end
+end)
+
+-- ============================================================
+-- 14. بناء الواجهة
+-- ============================================================
+local vp = workspace.CurrentCamera.ViewportSize
+local fw = math.min(vp.X - 20, 780)
+local fh = math.min(vp.Y - 20, 450)
+
+local Main = Instance.new("Frame", screenGui)
+Main.Size = UDim2.new(0, fw, 0, fh)
+Main.Position = UDim2.new(0.5, -fw/2, 0.5, -fh/2)
+Main.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+Main.BackgroundTransparency = 0.1
+Main.BorderColor3 = Color3.fromRGB(255, 255, 255)
+Main.BorderSizePixel = 1
+Main.Active = true
+SG.banned[Main] = true
+
+local mainCorner = Instance.new("UICorner", Main)
+mainCorner.CornerRadius = UDim.new(0, 8)
+
+-- شريط العنوان
+local Top = Instance.new("Frame", Main)
+Top.Size = UDim2.new(1, 0, 0, 36)
+Top.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+Top.BackgroundTransparency = 0.1
+Top.BorderSizePixel = 0
+SG.banned[Top] = true
+
+local topCorner = Instance.new("UICorner", Top)
+topCorner.CornerRadius = UDim.new(0, 8)
+
+local Title = Instance.new("TextLabel", Top)
+Title.Size = UDim2.new(1, -50, 1, 0)
+Title.Position = UDim2.new(0, 12, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "SYS // MONITOR"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 12
+Title.Font = Enum.Font.Code
+Title.TextXAlignment = Enum.TextXAlignment.Left
+SG.banned[Title] = true
+
+local Close = Instance.new("TextButton", Top)
+Close.Size = UDim2.new(0, 36, 0, 36)
+Close.Position = UDim2.new(1, -36, 0, 0)
+Close.BackgroundTransparency = 1
+Close.Text = "X"
+Close.TextColor3 = Color3.fromRGB(255, 255, 255)
+Close.TextSize = 13
+Close.Font = Enum.Font.Code
+SG.banned[Close] = true
+
+-- قائمة السجلات
+local Scroll = Instance.new("ScrollingFrame", Main)
+Scroll.Size = UDim2.new(0, 290, 1, -48)
+Scroll.Position = UDim2.new(0, 8, 0, 42)
+Scroll.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+Scroll.BackgroundTransparency = 0.4
+Scroll.BorderColor3 = Color3.fromRGB(80, 80, 80)
+Scroll.BorderSizePixel = 1
+Scroll.ScrollBarThickness = 3
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+SG.banned[Scroll] = true
+
+local scrollCorner = Instance.new("UICorner", Scroll)
+scrollCorner.CornerRadius = UDim.new(0, 6)
+
+local Layout = Instance.new("UIListLayout", Scroll)
+Layout.Padding = UDim.new(0, 3)
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- صندوق النص
+local Box = Instance.new("TextBox", Main)
+Box.Size = UDim2.new(1, -315, 1, -90)
+Box.Position = UDim2.new(0, 305, 0, 42)
+Box.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+Box.BackgroundTransparency = 0.3
+Box.BorderColor3 = Color3.fromRGB(80, 80, 80)
+Box.BorderSizePixel = 1
+Box.TextColor3 = Color3.fromRGB(240, 240, 240)
+Box.TextSize = 11
+Box.Font = Enum.Font.Code
+Box.TextXAlignment = Enum.TextXAlignment.Left
+Box.TextYAlignment = Enum.TextYAlignment.Top
+Box.MultiLine = true
+Box.ClearTextOnFocus = false
+Box.Text = "-- Select an entry..."
+SG.banned[Box] = true
+
+local boxCorner = Instance.new("UICorner", Box)
+boxCorner.CornerRadius = UDim.new(0, 6)
+
+-- زر النسخ
+local Copy = Instance.new("TextButton", Main)
+Copy.Size = UDim2.new(1, -315, 0, 34)
+Copy.Position = UDim2.new(0, 305, 1, -42)
+Copy.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+Copy.TextColor3 = Color3.fromRGB(0, 0, 0)
+Copy.Text = "COPY"
+Copy.TextSize = 11
+Copy.Font = Enum.Font.Code
+SG.banned[Copy] = true
+
+local copyCorner = Instance.new("UICorner", Copy)
+copyCorner.CornerRadius = UDim.new(0, 6)
+
+-- ============================================================
+-- 15. نظام السحب
+-- ============================================================
+local drag, dragStart, startPos
+
+Top.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 
+       or input.UserInputType == Enum.UserInputType.Touch then
+        drag = true
+        dragStart = input.Position
+        startPos = Main.Position
+    end
+end)
+
+Top.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 
+       or input.UserInputType == Enum.UserInputType.Touch then
+        drag = false
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if drag and (input.UserInputType == Enum.UserInputType.MouseMovement 
+       or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        Main.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- ============================================================
+-- 16. نظام السجلات
+-- ============================================================
+local Hashes = {}
+local LogsList = {}
+local Counter = 0
+local MAX_LOGS = 100
+local pending = {}
+local processing = false
+
+local function AddLog(tag, url, content)
+    if not SG.alive then return end
+    
+    -- إزالة الأقدم إذا وصلنا الحد
+    if Counter >= MAX_LOGS and #LogsList > 0 then
+        local old = table.remove(LogsList, 1)
+        pcall(function() old:Destroy() end)
+        Counter = Counter - 1
+    end
+    
+    local str = tostring(content)
+    if #str < 8 then return end
+    
+    -- بصمة فريدة
+    local key = #str .. "|" .. str:sub(1, 24)
+    if Hashes[key] then return end
+    Hashes[key] = true
+    Counter = Counter + 1
+    
+    -- زر السجل
+    local Btn = Instance.new("TextButton", Scroll)
+    Btn.Size = UDim2.new(1, -4, 0, 42)
+    Btn.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+    Btn.BorderColor3 = Color3.fromRGB(70, 70, 70)
+    Btn.BorderSizePixel = 1
+    Btn.Text = ""
+    Btn.LayoutOrder = Counter
+    SG.banned[Btn] = true
+    
+    local btnCorner = Instance.new("UICorner", Btn)
+    btnCorner.CornerRadius = UDim.new(0, 4)
+    
+    -- النص الأول (الوسم)
+    local L1 = Instance.new("TextLabel", Btn)
+    L1.Size = UDim2.new(1, -8, 0, 16)
+    L1.Position = UDim2.new(0, 4, 0, 3)
+    L1.BackgroundTransparency = 1
+    L1.Text = "[" .. tostring(tag) .. "]"
+    L1.TextColor3 = Color3.fromRGB(255, 255, 255)
+    L1.TextSize = 10
+    L1.Font = Enum.Font.Code
+    L1.TextXAlignment = Enum.TextXAlignment.Left
+    SG.banned[L1] = true
+    
+    -- النص الثاني (الرابط)
+    local L2 = Instance.new("TextLabel", Btn)
+    L2.Size = UDim2.new(1, -8, 0, 16)
+    L2.Position = UDim2.new(0, 4, 0, 20)
+    L2.BackgroundTransparency = 1
+    L2.Text = tostring(url)
+    L2.TextColor3 = Color3.fromRGB(150, 150, 150)
+    L2.TextSize = 9
+    L2.Font = Enum.Font.Code
+    L2.TextXAlignment = Enum.TextXAlignment.Left
+    L2.TextTruncate = Enum.TextTruncate.AtEnd
+    SG.banned[L2] = true
+    
+    -- عند الضغط
+    Btn.MouseButton1Click:Connect(function()
+        Box.Text = "[" .. tostring(tag) .. "] " .. tostring(url) .. "\n\n" .. str
+    end)
+    
+    table.insert(LogsList, Btn)
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 8)
+end
+
+local function QueueLog(tag, url, content)
+    if #pending > 200 then return end
+    table.insert(pending, {tag, url, content})
+    
+    if processing then return end
+    processing = true
+    
+    task.spawn(function()
+        while #pending > 0 and SG.alive do
+            local item = table.remove(pending, 1)
+            pcall(AddLog, item[1], item[2], item[3])
+            task.wait()
+        end
+        processing = false
+    end)
+end
+
+-- ============================================================
+-- 17. محرك الاعتراض
+-- ============================================================
+local function tagURL(url)
+    local lower = string.lower(tostring(url))
+    if lower:find("github", 1, true) then return "GITHUB"
+    elseif lower:find("pastebin", 1, true) then return "PASTEBIN"
+    elseif lower:find("pastefy", 1, true) then return "PASTEFY"
+    elseif lower:find("raw", 1, true) then return "RAW"
+    elseif lower:find("http", 1, true) then return "HTTP"
+    end
+    return "REQ"
+end
+
+-- اعتراض loadstring
+pcall(function()
+    if type(ORI.loadstring) ~= "function" then return end
+    
+    local wrapper = protectFunc(function(code, chunk)
+        local a, b = ORI.loadstring(code, chunk)
+        QueueLog("LOADSTRING", chunk or "Source", code)
+        return a, b
+    end)
+    
+    _ENV.loadstring = wrapper
+    SG.hooks.loadstring = wrapper
+    SG.protectedFuncs[wrapper] = true
+end)
+
+-- اعتراض request
+pcall(function()
+    if type(ORI.request) ~= "function" then return end
+    if type(ORI.hookfunction) ~= "function" then return end
+    
+    local wrapper = protectFunc(function(t)
+        local ok, res = pcall(ORI.request, t)
+        if ok and res then
+            local u = type(t) == "table" and (t.Url or t.url or t.URL) or "API"
+            local b = type(res) == "table" and (res.Body or res.body) or tostring(res)
+            QueueLog(tagURL(u), u, b)
+        end
+        if not ok then error(res, 0) end
+        return res
+    end)
+    
+    ORI.hookfunction(ORI.request, wrapper)
+    SG.hooks.request = wrapper
+    SG.protectedFuncs[wrapper] = true
+end)
+
+-- اعتراض HttpGet
+pcall(function()
+    if type(game.HttpGet) ~= "function" then return end
+    if type(ORI.hookfunction) ~= "function" then return end
+    
+    local rawHttpGet = game.HttpGet
+    local wrapper = protectFunc(function(self, url, ...)
+        local res = rawHttpGet(self, url, ...)
+        QueueLog(tagURL(url), url, res)
+        return res
+    end)
+    
+    ORI.hookfunction(game.HttpGet, wrapper)
+    SG.hooks.HttpGet = wrapper
+    SG.protectedFuncs[wrapper] = true
+end)
+
+-- ============================================================
+-- 18. Watchdog (يحمي الهوكس من الإزالة)
+-- ============================================================
+task.spawn(function()
+    while SG.alive do
+        task.wait(3)
+        pcall(function()
+            -- استعادة الهوكس إذا انحذفت
+            if SG.hooks.loadstring and _ENV.loadstring ~= SG.hooks.loadstring then
+                _ENV.loadstring = SG.hooks.loadstring
+            end
+            if SG.hooks.getgc and _ENV.getgc ~= SG.hooks.getgc then
+                _ENV.getgc = SG.hooks.getgc
+            end
+            if SG.hooks.getreg and _ENV.getreg ~= SG.hooks.getreg then
+                _ENV.getreg = SG.hooks.getreg
+            end
+            
+            -- استعادة الواجهة إذا انحذفت
+            if not screenGui or not screenGui.Parent then
+                pcall(function()
+                    local newContainer = Instance.new("Folder")
+                    newContainer.Name = "Terrain"
+                    newContainer.Parent = parent
+                    
+                    local newGui = Instance.new("ScreenGui")
+                    newGui.Name = "_c" .. randomStr(10)
+                    newGui.ResetOnSpawn = false
+                    newGui.DisplayOrder = 999999
+                    newGui.Enabled = true
+                    newGui.Parent = newContainer
+                    
+                    container = newContainer
+                    screenGui = newGui
+                    SG.banned[newContainer] = true
+                    SG.banned[newGui] = true
+                    SG.protected[newContainer] = true
+                    SG.protected[newGui] = true
+                end)
+            end
+        end)
+    end
+end)
+
+-- ============================================================
+-- 19. تنظيف الذاكرة الدوري
+-- ============================================================
+task.spawn(function()
+    while SG.alive do
+        task.wait(20)
+        pcall(function()
+            -- تنظيف السجلات الزائدة
+            if #LogsList > 80 then
+                local toRemove = #LogsList - 80
+                for _ = 1, toRemove do
+                    local old = table.remove(LogsList, 1)
+                    pcall(function() old:Destroy() end)
+                    Counter = Counter - 1
+                end
+            end
+            
+            -- تنظيف الهاشات
+            local hashCount = 0
+            for _ in pairs(Hashes) do hashCount = hashCount + 1 end
+            if hashCount > 400 then Hashes = {} end
+        end)
+    end
+end)
+
+-- ============================================================
+-- 20. دالة الإغلاق
+-- ============================================================
+SG.clean = function()
+    SG.alive = false
+    pcall(function() if screenGui then screenGui:Destroy() end end)
+    pcall(function() if container then container:Destroy() end end)
+    pcall(function() _ENV._SYSGUARD = nil end)
+end
+
+Close.MouseButton1Click:Connect(function()
+    SG.clean()
+end)
+
+Copy.MouseButton1Click:Connect(function()
+    if _ENV.setclipboard then
+        pcall(_ENV.setclipboard, Box.Text)
+        Copy.Text = "COPIED!"
+        task.wait(0.8)
+        Copy.Text = "COPY"
+    end
+end)
+
+-- ============================================================
+-- 21. التشغيل
+-- ============================================================
+task.wait(0.1)
+screenGui.Enabled = true
+
+QueueLog("SYS", "Ready", "Stable stealth monitor active.")
+
+return true
